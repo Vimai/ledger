@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-import click
 import csv
-from datetime import datetime, timedelta
-from decimal import Decimal
 import os
 import sqlite3
-from typing import Dict, List
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Dict, List
 
+import click
 
 
 @click.group()
@@ -101,18 +101,13 @@ def balances(ctx: Dict, end_date: str = None) -> None:
     if end_date is None:
         end_date = datetime.now().date().isoformat()
 
-    overall_advance_balance = Decimal(0)
-    overall_interest_payable_balance = Decimal(0)
-    overall_interest_paid = Decimal(0)
-    overall_payments_for_future = Decimal(0)
+    user_global_balance = UserGlobalBalance()
 
     # query events from database example
     with sqlite3.connect(ctx.obj["DB_PATH"]) as connection:
         cursor = connection.cursor()
         result = cursor.execute("select * from events order by date_created asc;")
         events = result.fetchall()
-
-        user_global_balance = UserGlobalBalance()
 
         for event in events:
             if datetime.strptime(end_date, '%Y-%m-%d') >= datetime.strptime(event[3], '%Y-%m-%d'):
@@ -128,7 +123,6 @@ def balances(ctx: Dict, end_date: str = None) -> None:
     overall_interest_payable_balance = global_statement["overall_interest_payable_balance"]
     overall_interest_paid = global_statement["overall_interest_paid"]
     individual_advance_statement = global_statement["individual_advance_statement"]
-
 
     click.echo("Advances:")
     click.echo("----------------------------------------------------------")
@@ -197,7 +191,6 @@ class UserGlobalBalance:
             self.pay_advance(amount, create_date)
 
     def pay_advance(self, amount: Decimal, date: str):
-        # breakpoint()
         paid_date = datetime.strptime(date, '%Y-%m-%d')
         for advance in self.actives_advances:
             amount = advance.pay_interest(amount, paid_date)
@@ -205,7 +198,7 @@ class UserGlobalBalance:
                 break
         if amount > Decimal("0"):
             for advance in self.actives_advances:
-                amount = advance.pay_advance(amount, paid_date)
+                amount = advance.pay(amount)
                 if amount == Decimal("0"):
                     break
         if amount > Decimal("0"):
@@ -217,7 +210,7 @@ class InterestRateStrategyBase(ABC):
         self.daily_interest = daily_interest
 
     @abstractmethod
-    def calculate(self, amount: Decimal, daily_interest: Decimal, days: Decimal) -> Decimal:
+    def calculate(self, amount: Decimal, days: Decimal) -> Decimal:
         return NotImplemented
 
 
@@ -264,7 +257,7 @@ class Advance:
         )
         self._updated_at = date
 
-    def pay_advance(self, amount, paid_date: datetime) -> Decimal:
+    def pay(self, amount) -> Decimal:
         """
         Pay advance and return remaining amount.
         """

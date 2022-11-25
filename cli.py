@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import click
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 import os
 import sqlite3
-from typing import Dict
+from typing import Dict, List
+from abc import ABC, abstractmethod
+
 
 
 @click.group()
@@ -109,14 +111,37 @@ def balances(ctx: Dict, end_date: str = None) -> None:
         cursor = connection.cursor()
         result = cursor.execute("select * from events order by date_created asc;")
         events = result.fetchall()
-        # TODO: FIXME Run interest calculation.
+
+        user_global_balance = UserGlobalBalance()
+
+        for event in events:
+            if datetime.strptime(end_date, '%Y-%m-%d') >= datetime.strptime(event[3], '%Y-%m-%d'):
+                if event[1] == "advance":
+                    user_global_balance.create_advance(Decimal(str(event[2])), event[3])
+                elif event[1] == "payment":
+                    user_global_balance.pay_advance(Decimal(str(event[2])), event[3])
+
+    global_statement = user_global_balance.get_global_statement(end_date)
+
+    overall_payments_for_future = global_statement["overall_payments_for_future"]
+    overall_advance_balance = global_statement["overall_advance_balance"]
+    overall_interest_payable_balance = global_statement["overall_interest_payable_balance"]
+    overall_interest_paid = global_statement["overall_interest_paid"]
+    individual_advance_statement = global_statement["individual_advance_statement"]
+
 
     click.echo("Advances:")
     click.echo("----------------------------------------------------------")
     # NOTE: This initial print adheres to the format spec.
     click.echo("{0:>10}{1:>11}{2:>17}{3:>20}".format("Identifier", "Date", "Initial Amt", "Current Balance"))
 
-    # TODO: FIXME Print each advance row and relevant advance statistics
+    for x in individual_advance_statement:
+        click.echo("{0:>10}{1:>11}{2:>17.2f}{3:>20.2f}".format(
+            x["identifier"],
+            x["created_at"],
+            x["initial_amount"],
+            x["balance"]
+        ))
 
     # print summary statistics
     # NOTE: These prints adhere to the format spec.
@@ -126,6 +151,146 @@ def balances(ctx: Dict, end_date: str = None) -> None:
     click.echo("Interest Payable Balance: {0:32.2f}".format(overall_interest_payable_balance))
     click.echo("Total Interest Paid: {0:37.2f}".format(overall_interest_paid))
     click.echo("Balance Applicable to Future Advances: {0:>19.2f}".format(overall_payments_for_future))
+
+
+class UserGlobalBalance:
+    def __init__(self):
+        self.overall_payments_for_future = Decimal(0)
+        self.actives_advances: List[Advance] = []
+
+    def get_global_statement(self, end_date: str):
+        individual_advance_statement = []
+
+        date = datetime.strptime(end_date, '%Y-%m-%d')
+        overall_advance_balance = Decimal("0")
+        overall_interest_payable_balance = Decimal("0")
+        overall_interest_paid = Decimal("0")
+        for advance in self.actives_advances:
+            advance_statement = advance.get_statement(date)
+            overall_advance_balance += advance_statement["balance"]
+            overall_interest_payable_balance += advance_statement["interest_payable_balance"]
+            overall_interest_paid += advance_statement["interest_paid"]
+            individual_advance_statement.append(advance_statement)
+
+        return {
+            "overall_payments_for_future": self.overall_payments_for_future,
+            "overall_advance_balance": overall_advance_balance,
+            "overall_interest_payable_balance": overall_interest_payable_balance,
+            "overall_interest_paid": overall_interest_paid,
+            "individual_advance_statement": individual_advance_statement
+        }
+
+    def create_advance(self, balance: Decimal, create_date):
+        advance_date = datetime.strptime(create_date, '%Y-%m-%d')
+        self.actives_advances.append(
+            Advance(
+                SimpleInterestRateStrategy(Decimal("0.00035")),
+                len(self.actives_advances) + 1,
+                balance,
+                advance_date
+            )
+        )
+
+        if self.overall_payments_for_future > Decimal("0"):
+            amount = self.overall_payments_for_future
+            self.overall_payments_for_future = Decimal("0")
+            self.pay_advance(amount, create_date)
+
+    def pay_advance(self, amount: Decimal, date: str):
+        # breakpoint()
+        paid_date = datetime.strptime(date, '%Y-%m-%d')
+        for advance in self.actives_advances:
+            amount = advance.pay_interest(amount, paid_date)
+            if amount == Decimal("0"):
+                break
+        if amount > Decimal("0"):
+            for advance in self.actives_advances:
+                amount = advance.pay_advance(amount, paid_date)
+                if amount == Decimal("0"):
+                    break
+        if amount > Decimal("0"):
+            self.overall_payments_for_future += amount
+
+
+class InterestRateStrategyBase(ABC):
+    def __init__(self, daily_interest):
+        self.daily_interest = daily_interest
+
+    @abstractmethod
+    def calculate(self, amount: Decimal, daily_interest: Decimal, days: Decimal) -> Decimal:
+        return NotImplemented
+
+
+class SimpleInterestRateStrategy(InterestRateStrategyBase):
+    def calculate(self, amount: Decimal, days: Decimal) -> Decimal:
+        return (amount * (Decimal("1") + self.daily_interest * days)) - amount
+
+
+class Advance:
+    def __init__(
+        self,
+        interest_rate_strategy: InterestRateStrategyBase,
+        identifier,
+        balance: Decimal,
+        created_at: datetime
+    ):
+        self._identifier = identifier
+        self._created_at = created_at
+        self._updated_at = created_at
+        self._interest_rate_strategy = interest_rate_strategy
+        self._initial_amount = balance
+
+        self._balance = balance
+        self._interest_payable_balance = Decimal("0")
+        self._interest_paid = Decimal("0")
+
+    def get_statement(self, date: datetime):
+        self.calculate_interest_payable_balance(date + timedelta(days=1))
+
+        return {
+            "identifier": self._identifier,
+            "created_at": self._created_at.date().isoformat(),
+            "initial_amount": self._initial_amount,
+            "balance": self._balance,
+            "interest_payable_balance": self._interest_payable_balance,
+            "interest_paid": self._interest_paid,
+        }
+
+    def calculate_interest_payable_balance(self, date: datetime) -> None:
+        interest_period = date - self._updated_at
+        self._interest_payable_balance += self._interest_rate_strategy.calculate(
+            self._balance,
+            Decimal(str(interest_period.days))
+        )
+        self._updated_at = date
+
+    def pay_advance(self, amount, paid_date: datetime) -> Decimal:
+        """
+        Pay advance and return remaining amount.
+        """
+        if amount <= self._balance:
+            self._balance -= amount
+            return Decimal("0")
+
+        remaining_amount_applicable_to_future_advances = amount - self._balance
+        self._balance = 0
+        return remaining_amount_applicable_to_future_advances
+
+    def pay_interest(self, amount, paid_date: datetime) -> Decimal:
+        """
+        Pay interest and return remaining amount.
+        """
+        self.calculate_interest_payable_balance(paid_date)
+
+        if amount <= self._interest_payable_balance:
+            self._interest_payable_balance -= amount
+            self._interest_paid += amount
+            return Decimal("0")
+        remaining_amount_applicable_to_future_advances = amount - self._interest_payable_balance
+
+        self._interest_paid += self._interest_payable_balance
+        self._interest_payable_balance = 0
+        return remaining_amount_applicable_to_future_advances
 
 
 if __name__ == "__main__":

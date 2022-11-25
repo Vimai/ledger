@@ -10,5 +10,4 @@ Summary Statistics:
 Aggregate Advance Balance:                          757.79
 Interest Payable Balance:                            15.65
 Total Interest Paid:                                 57.79
-Balance Applicable to Future Advances:
-0
+Balance Applicable to Future Advances:                0.00
